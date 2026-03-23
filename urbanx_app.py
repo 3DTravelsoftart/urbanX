@@ -17,11 +17,11 @@ if "lat" not in st.session_state:
     st.session_state.lat = 47.7486
     st.session_state.lon = 26.669
 
-if "parcels" not in st.session_state:
-    st.session_state.parcels = []
+if "parcel" not in st.session_state:
+    st.session_state.parcel = None
 
 # =========================
-# BUILDINGS (SAFE)
+# BUILDINGS
 # =========================
 def load_buildings(lat, lon):
 
@@ -34,7 +34,12 @@ def load_buildings(lat, lon):
         out skel qt;
         """
 
-        r = requests.post("https://overpass-api.de/api/interpreter", data=query, timeout=10)
+        r = requests.post(
+            "https://overpass-api.de/api/interpreter",
+            data=query,
+            timeout=10
+        )
+
         data = r.json()
 
         nodes = {}
@@ -61,32 +66,34 @@ def load_buildings(lat, lon):
                         "height": h
                     })
 
-        if len(buildings) == 0:
-            raise Exception("fallback")
-
         return buildings
 
     except:
-        # fallback vizual
-        return [{
-            "polygon": [
-                [lon-0.0003, lat-0.0003],
-                [lon-0.0001, lat-0.0003],
-                [lon-0.0001, lat-0.0001],
-                [lon-0.0003, lat-0.0001]
-            ],
-            "height": 15
-        }]
+        return []
+
+# =========================
+# AUTO PARCEL (SMART)
+# =========================
+def generate_auto_parcel(lat, lon):
+
+    size = 0.0003
+
+    return [
+        (lon - size, lat - size),
+        (lon + size, lat - size),
+        (lon + size, lat + size),
+        (lon - size, lat + size)
+    ]
 
 # =========================
 # AI PUZ
 # =========================
-def generate_puz(points):
+def generate_puz(polygon):
 
-    if len(points) < 3:
+    if not polygon:
         return None
 
-    poly = Polygon(points)
+    poly = Polygon(polygon)
     area = poly.area * 10000000
 
     POT = 0.6
@@ -98,7 +105,7 @@ def generate_puz(points):
     height = min((total_area / footprint) * 3, 45)
 
     return {
-        "polygon": points,
+        "polygon": polygon,
         "area": area,
         "footprint": footprint,
         "height": height,
@@ -112,6 +119,7 @@ def generate_puz(points):
 def generate_pdf(adresa, data):
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+
     doc = SimpleDocTemplate(tmp.name)
     styles = getSampleStyleSheet()
 
@@ -130,7 +138,7 @@ def generate_pdf(adresa, data):
 # =========================
 # UI
 # =========================
-st.title("UrbanX ENTERPRISE – Client Ready")
+st.title("UrbanX ENTERPRISE – Auto Parcel + AI")
 
 adresa = st.text_input("Adresă proiect")
 
@@ -140,28 +148,34 @@ lat = st.session_state.lat
 lon = st.session_state.lon
 
 # =========================
-# TAB 1 - HARTA
+# TAB HARTA
 # =========================
 with tabs[0]:
 
+    st.info("Click pe hartă pentru selecție automată parcelă")
+
     m = folium.Map(location=[lat, lon], zoom_start=16)
 
-    for p in st.session_state.parcels:
-        folium.CircleMarker(location=(p[1], p[0]), color="red").add_to(m)
+    if st.session_state.parcel:
+        folium.Polygon(
+            locations=[(p[1], p[0]) for p in st.session_state.parcel],
+            color="blue"
+        ).add_to(m)
 
     map_data = st_folium(m, height=500)
 
     if map_data and map_data.get("last_clicked"):
         c = map_data["last_clicked"]
-        st.session_state.parcels.append((c["lng"], c["lat"]))
 
-    st.info(f"{len(st.session_state.parcels)} puncte selectate")
+        st.session_state.lat = c["lat"]
+        st.session_state.lon = c["lng"]
 
-    if st.button("Reset parcelă"):
-        st.session_state.parcels = []
+        st.session_state.parcel = generate_auto_parcel(c["lat"], c["lng"])
+
+        st.success("Parcelă generată automat ✔")
 
 # =========================
-# TAB 2 - CLADIRI
+# TAB CLADIRI
 # =========================
 with tabs[1]:
 
@@ -169,38 +183,32 @@ with tabs[1]:
 
     st.success(f"{len(buildings)} clădiri detectate")
 
-    st.markdown("**Legendă:**")
-    st.markdown("- gri = clădiri existente")
-    st.markdown("- înălțimi estimate din OSM")
-
 # =========================
-# TAB 3 - INDICATORI
+# TAB INDICATORI
 # =========================
 with tabs[2]:
 
-    puz = generate_puz(st.session_state.parcels)
+    puz = generate_puz(st.session_state.parcel)
 
     if puz:
         col1, col2, col3 = st.columns(3)
-        col1.metric("Suprafață teren", round(puz["area"],1))
+        col1.metric("Suprafață", round(puz["area"],1))
         col2.metric("POT", puz["POT"])
         col3.metric("CUT", puz["CUT"])
 
 # =========================
-# TAB 4 - 3D
+# TAB 3D
 # =========================
 with tabs[3]:
 
     buildings = load_buildings(lat, lon)
-    puz = generate_puz(st.session_state.parcels)
+    puz = generate_puz(st.session_state.parcel)
 
     if not puz:
-        st.warning("Selectează minim 3 puncte")
+        st.warning("Selectează parcela")
     else:
 
-        st.markdown("### Legendă")
-        st.markdown("🔵 Albastru = Volum propus")
-        st.markdown("⚪ Gri = Clădiri existente")
+        st.markdown("🔵 Volum propus | ⚪ Clădiri existente")
 
         data = []
 
@@ -236,11 +244,11 @@ with tabs[3]:
         st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view))
 
 # =========================
-# TAB 5 - PDF
+# TAB PDF
 # =========================
 with tabs[4]:
 
-    puz = generate_puz(st.session_state.parcels)
+    puz = generate_puz(st.session_state.parcel)
 
     if puz and st.button("Generează PDF"):
 
