@@ -16,7 +16,6 @@ st.set_page_config(layout="wide")
 if "lat" not in st.session_state:
     st.session_state.lat = 47.7486
     st.session_state.lon = 26.669
-
 if "parcels" not in st.session_state:
     st.session_state.parcels = []
 
