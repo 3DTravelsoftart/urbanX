@@ -1,218 +1,240 @@
 import streamlit as st
 import folium
-from folium.plugins import Draw
 from streamlit_folium import st_folium
-from shapely.geometry import shape
+from shapely.geometry import Polygon, Point
 import requests
 import pydeck as pdk
 
 st.set_page_config(layout="wide")
 
-st.title("UrbanX – Analiză urbanistică (cu retrageri)")
+st.title("UrbanX – Analiză urbanistică (GIS + 3D)")
 
-# ========================
-# HARTĂ
-# ========================
-
+# =============================
+# HARTĂ + DESEN
+# =============================
 st.header("1. Desenează terenul")
 
-m = folium.Map(location=[47.7486, 26.669], zoom_start=16)
+m = folium.Map(location=[47.75, 26.66], zoom_start=16)
 
-draw = Draw(
-    draw_options={
-        "polygon": True,
-        "rectangle": True,
-        "circle": False,
-        "marker": False,
-        "polyline": False,
-    }
-)
+draw = folium.plugins.Draw(export=True)
 draw.add_to(m)
 
-map_data = st_folium(m, height=500, width=1000)
+map_data = st_folium(m, width=900, height=500)
 
-# ========================
-# PROCESARE
-# ========================
+teren = None
 
-if map_data and map_data.get("last_active_drawing"):
+if map_data and map_data["all_drawings"]:
+    coords = map_data["all_drawings"][-1]["geometry"]["coordinates"][0]
+    coords = [(c[1], c[0]) for c in coords]
 
-    geojson = map_data["last_active_drawing"]
-    geom = shape(geojson["geometry"])
+    teren = Polygon(coords)
 
-    coords = list(geom.exterior.coords)
-    polygon = [[lon, lat] for lon, lat in coords]
-
-    surface = int(geom.area * (111000 ** 2))
-
-    centroid = geom.centroid
-    lat = centroid.y
-    lon = centroid.x
-
+# =============================
+# SUPRAFAȚĂ
+# =============================
+if teren:
     st.success("Teren definit")
-    st.write("Suprafață:", surface, "mp")
 
-    # ========================
-    # RETRAGERI AUTOMATE
-    # ========================
+    suprafata = teren.area * 100000  # aproximare
+    st.write(f"Suprafață: {int(suprafata)} mp")
 
-    st.markdown("## 📏 Retrageri urbanistice")
+    center = teren.centroid
 
-    setback = st.slider("Retragere generală (m)", 2, 10, 5)
-
-    setback_deg = setback / 111000
-
-    buildable_geom = geom.buffer(-setback_deg)
-
-    if buildable_geom.is_empty:
-        st.error("Retragerile sunt prea mari pentru acest teren")
-        st.stop()
-
-    buildable_coords = list(buildable_geom.exterior.coords)
-    buildable_polygon = [[lon, lat] for lon, lat in buildable_coords]
-
-    buildable_surface = int(buildable_geom.area * (111000 ** 2))
-
-    st.write("Suprafață construibilă:", buildable_surface, "mp")
-
-    # ========================
-    # CLĂDIRI OSM
-    # ========================
+# =============================
+# OSM BUILDINGS
+# =============================
+    st.header("2. Clădiri din jur")
 
     query = f"""
     [out:json];
-    (
-      way["building"](around:200,{lat},{lon});
-    );
+    way["building"](around:100,{center.x},{center.y});
     out geom;
     """
 
     url = "https://overpass-api.de/api/interpreter"
-
-    response = requests.get(url, params={'data': query}, timeout=10)
-
-    if response.status_code != 200:
-        st.error("Eroare OSM")
-        st.stop()
+    data = None
 
     try:
-        data = response.json()
+        response = requests.get(url, params={'data': query})
+
+        if response.status_code == 200:
+            data = response.json()
+        else:
+            st.warning("Nu s-au putut încărca clădirile")
+
     except:
-        st.error("OSM indisponibil")
-        st.stop()
+        st.warning("Eroare conexiune OSM")
 
-    buildings = []
+    heights = []
 
-    for el in data["elements"]:
-        if "geometry" in el:
-            coords_b = [[p["lon"], p["lat"]] for p in el["geometry"]]
-
+    if data and "elements" in data:
+        for el in data["elements"]:
             tags = el.get("tags", {})
+
+            height = 10
 
             if "height" in tags:
                 try:
-                    height = float(tags["height"].replace("m", "").strip())
+                    height = float(tags["height"].replace(" m", ""))
                 except:
                     height = 10
+
             elif "building:levels" in tags:
-                height = float(tags["building:levels"]) * 3
-            else:
-                height = 10
+                try:
+                    height = float(tags["building:levels"]) * 3
+                except:
+                    height = 10
 
-            buildings.append({
-                "polygon": coords_b,
-                "height": height
-            })
+            heights.append(height)
 
-    # ========================
-    # STUDIU URBANISTIC
-    # ========================
-
-    st.markdown("## 🧠 Studiu urbanistic")
-
-    num_buildings = len(buildings)
-
-    heights = [b["height"] for b in buildings]
-    avg_height = sum(heights) / len(heights) if heights else 0
-    avg_levels = int(avg_height / 3) if avg_height else 0
-
-    if num_buildings > 120:
-        density = "Ridicată"
-        pot = 60
-        cut = 3.5
-    elif num_buildings > 60:
-        density = "Medie"
-        pot = 40
-        cut = 2.0
+    if heights:
+        regim_vecini = sum(heights) / len(heights)
     else:
-        density = "Scăzută"
-        pot = 30
-        cut = 1.2
+        regim_vecini = 12
 
-    sc = buildable_surface * pot / 100
-    sd = buildable_surface * cut
+    st.write(f"Înălțime medie zonă: {int(regim_vecini)} m")
 
-    levels = int(sd / sc) if sc else 0
-    height_recommended = levels * 3
+# =============================
+# DETECTARE STRADĂ
+# =============================
+    st.header("3. Detectare stradă")
 
-    st.write("Densitate:", density)
-    st.write("Niveluri recomandate:", levels)
+    road_query = f"""
+    [out:json];
+    way["highway"](around:50,{center.x},{center.y});
+    out tags;
+    """
 
-    # ========================
-    # 3D VIZUALIZARE
-    # ========================
+    strada = "necunoscută"
 
-    building_layer = pdk.Layer(
-        "PolygonLayer",
-        data=buildings,
-        get_polygon="polygon",
-        get_fill_color=[180, 180, 180, 160],
-        extruded=True,
-        get_elevation="height",
-    )
+    try:
+        r = requests.get(url, params={'data': road_query})
+        road_data = r.json()
 
-    terrain_layer = pdk.Layer(
-        "PolygonLayer",
-        data=[{"polygon": polygon}],
-        get_polygon="polygon",
-        get_fill_color=[0, 100, 255, 120],
-        extruded=True,
-        get_elevation=1,
-    )
+        if road_data["elements"]:
+            strada = road_data["elements"][0]["tags"].get("name", "stradă fără nume")
 
-    buildable_layer = pdk.Layer(
-        "PolygonLayer",
-        data=[{"polygon": buildable_polygon}],
-        get_polygon="polygon",
-        get_fill_color=[0, 255, 100, 120],
-        extruded=True,
-        get_elevation=1,
-    )
+    except:
+        pass
 
-    volume_layer = pdk.Layer(
-        "PolygonLayer",
-        data=[{"polygon": buildable_polygon}],
-        get_polygon="polygon",
-        get_fill_color=[255, 0, 0, 180],
-        extruded=True,
-        get_elevation=height_recommended,
-    )
+    st.write(f"Stradă detectată: **{strada}**")
 
-    view = pdk.ViewState(
-        latitude=lat,
-        longitude=lon,
-        zoom=17,
-        pitch=45,
-    )
+# =============================
+# RETRAGERI
+# =============================
+    st.header("4. Retrageri urbanistice")
 
-    st.pydeck_chart(
-        pdk.Deck(
-            layers=[
-                building_layer,
-                terrain_layer,
-                buildable_layer,
-                volume_layer
-            ],
-            initial_view_state=view,
+    retragere = st.slider("Retragere (m)", 1, 10, 5)
+
+    max_retragere = min(
+        teren.bounds[2] - teren.bounds[0],
+        teren.bounds[3] - teren.bounds[1]
+    ) / 4
+
+    if retragere > max_retragere:
+        st.warning("Retragerea a fost ajustată automat")
+        retragere = max_retragere
+
+    teren_retras = teren.buffer(-retragere)
+
+    if teren_retras.is_empty:
+        st.error("Teren invalid după retragere")
+    else:
+        st.success("Retrageri aplicate")
+
+# =============================
+# INDICATORI
+# =============================
+        st.header("5. Indicatori urbanistici")
+
+        POT = 0.4
+        CUT = 1.2
+
+        amprenta = suprafata * POT
+        suprafata_desfasurata = suprafata * CUT
+
+        st.write(f"POT: {POT}")
+        st.write(f"CUT: {CUT}")
+        st.write(f"Amprentă: {int(amprenta)} mp")
+        st.write(f"Suprafață desfășurată: {int(suprafata_desfasurata)} mp")
+
+# =============================
+# 3D VIEW
+# =============================
+        st.header("6. Vizualizare 3D")
+
+        layers = []
+
+        # TEREN
+        teren_layer = pdk.Layer(
+            "PolygonLayer",
+            data=[{"polygon": list(teren.exterior.coords)}],
+            get_polygon="polygon",
+            get_fill_color=[255, 0, 0, 80],
+            extruded=True,
+            get_elevation=1,
         )
-    )
+        layers.append(teren_layer)
+
+        # VOLUM PROPUS
+        volum_layer = pdk.Layer(
+            "PolygonLayer",
+            data=[{"polygon": list(teren_retras.exterior.coords)}],
+            get_polygon="polygon",
+            get_fill_color=[0, 255, 0, 120],
+            extruded=True,
+            get_elevation=regim_vecini,
+        )
+        layers.append(volum_layer)
+
+        # CLĂDIRI
+        building_polygons = []
+
+        if data and "elements" in data:
+            for el in data["elements"]:
+                if "geometry" in el:
+                    coords_b = [(p["lat"], p["lon"]) for p in el["geometry"]]
+
+                    height = 10
+                    tags = el.get("tags", {})
+
+                    if "height" in tags:
+                        try:
+                            height = float(tags["height"].replace(" m", ""))
+                        except:
+                            pass
+
+                    elif "building:levels" in tags:
+                        try:
+                            height = float(tags["building:levels"]) * 3
+                        except:
+                            pass
+
+                    building_polygons.append({
+                        "polygon": coords_b,
+                        "height": height
+                    })
+
+        buildings_layer = pdk.Layer(
+            "PolygonLayer",
+            data=building_polygons,
+            get_polygon="polygon",
+            get_fill_color=[200, 200, 200, 150],
+            extruded=True,
+            get_elevation="height",
+        )
+        layers.append(buildings_layer)
+
+        view_state = pdk.ViewState(
+            latitude=center.x,
+            longitude=center.y,
+            zoom=16,
+            pitch=45,
+        )
+
+        deck = pdk.Deck(
+            layers=layers,
+            initial_view_state=view_state,
+        )
+
+        st.pydeck_chart(deck)
