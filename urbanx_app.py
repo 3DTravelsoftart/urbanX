@@ -65,7 +65,7 @@ def load_buildings(lat, lon):
                 elif "building:levels" in tags:
                     h = float(tags["building:levels"]) * 3
                 else:
-                    h = 12
+                    h = 10  # fallback mai realist
 
                 buildings.append({
                     "polygon": coords,
@@ -84,7 +84,6 @@ def generate_volume(points, buildings):
     poly = Polygon(points)
     minx, miny, maxx, maxy = poly.bounds
 
-    # mic offset ca să nu suprapună clădiri
     footprint = [
         (minx + 0.00002, miny + 0.00002),
         (maxx - 0.00002, miny + 0.00002),
@@ -104,10 +103,8 @@ def generate_pdf(area, pot, cut):
     styles = getSampleStyleSheet()
 
     content = []
-
     content.append(Paragraph("UrbanX – Studiu Urbanistic", styles["Title"]))
     content.append(Spacer(1, 20))
-
     content.append(Paragraph(f"Suprafață teren: {round(area)} mp", styles["Normal"]))
     content.append(Paragraph(f"POT: {pot}", styles["Normal"]))
     content.append(Paragraph(f"CUT: {cut}", styles["Normal"]))
@@ -128,7 +125,7 @@ lat, lon = 47.746, 26.669
 
 with tabs[0]:
 
-    st.info("Click pe hartă pentru a defini parcela (minim 3 puncte)")
+    st.info("Click pe hartă pentru a defini parcela")
 
     m = folium.Map(location=[lat, lon], zoom_start=17)
 
@@ -170,7 +167,6 @@ with tabs[1]:
     st.metric("Suprafață teren", f"{round(area)} mp")
     st.metric("POT", pot)
     st.metric("CUT", cut)
-
     st.metric("Suprafață construită", round(area * pot))
     st.metric("Suprafață desfășurată", round(area * cut))
 
@@ -181,7 +177,7 @@ with tabs[1]:
 with tabs[2]:
 
     st.write("Zonă urbană existentă")
-    st.write("Regim estimat: P+3 – P+5")
+    st.write("Regim estimat: P+2 – P+5")
     st.write("Funcțiune: mixt rezidențial")
 
 # =========================
@@ -195,8 +191,10 @@ with tabs[3]:
     st.markdown("""
     🔵 Volum propus  
     ⚪ Clădiri existente  
-    📏 Etichete = înălțime (m)
+    📏 Etichete = înălțime reală (m)
     """)
+
+    VISUAL_SCALE = 3
 
     buildings = load_buildings(lat, lon)
     volume = generate_volume(st.session_state.points, buildings)
@@ -206,11 +204,15 @@ with tabs[3]:
 
     # EXISTENTE
     for b in buildings:
+        h_real = b["height"]
+        h_visual = h_real * VISUAL_SCALE
+
         polygons.append({
             "polygon": b["polygon"],
-            "height": b["height"],
-            "color": [200, 200, 200],
-            "type": "existent"
+            "height": h_visual,
+            "real_height": h_real,
+            "color": [180, 180, 180],
+            "type": "Clădire existentă"
         })
 
         poly = Polygon(b["polygon"])
@@ -218,16 +220,17 @@ with tabs[3]:
 
         labels.append({
             "position": [c.x, c.y],
-            "text": f"{int(b['height'])}m"
+            "text": f"{int(h_real)}m"
         })
 
     # PROPUS
     if volume:
         polygons.append({
             "polygon": volume["polygon"],
-            "height": volume["height"],
+            "height": volume["height"] * VISUAL_SCALE,
+            "real_height": volume["height"],
             "color": [0, 120, 255],
-            "type": "propus"
+            "type": "Volum propus"
         })
 
         poly = Polygon(volume["polygon"])
@@ -245,6 +248,7 @@ with tabs[3]:
         get_elevation="height",
         get_fill_color="color",
         extruded=True,
+        wireframe=True,
         pickable=True
     )
 
@@ -253,7 +257,7 @@ with tabs[3]:
         labels,
         get_position="position",
         get_text="text",
-        get_size=16,
+        get_size=18,
         get_color=[255,255,255],
         billboard=True
     )
@@ -264,11 +268,11 @@ with tabs[3]:
             latitude=lat,
             longitude=lon,
             zoom=17,
-            pitch=55,
-            bearing=30
+            pitch=60,
+            bearing=40
         ),
         tooltip={
-            "html": "<b>{type}</b><br/>Înălțime: {height} m",
+            "html": "<b>{type}</b><br/>Înălțime: {real_height} m",
             "style": {"backgroundColor": "black", "color": "white"}
         }
     ))
