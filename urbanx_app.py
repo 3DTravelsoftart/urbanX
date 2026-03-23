@@ -4,14 +4,13 @@ from streamlit_folium import st_folium
 import requests
 import pydeck as pdk
 from shapely.geometry import Polygon
-from shapely.ops import unary_union
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
-from io import BytesIO
+from pyproj import Transformer
 
 st.set_page_config(layout="wide")
 
-st.title("🏙️ UrbanX PRO – Analiză urbanistică AI")
+st.title("🏙️ UrbanX PRO – Analiză urbanistică")
 
 # =========================
 # SESSION
@@ -19,51 +18,58 @@ st.title("🏙️ UrbanX PRO – Analiză urbanistică AI")
 if "points" not in st.session_state:
     st.session_state.points = []
 
-if "lat" not in st.session_state:
-    st.session_state.lat = 47.7486
-    st.session_state.lon = 26.669
+# =========================
+# FUNCTIONS
+# =========================
 
-# =========================
-# GEOCODE
-# =========================
-def geocode(address):
-    try:
-        url = f"https://nominatim.openstreetmap.org/search?format=json&q={address}"
-        r = requests.get(url, headers={"User-Agent": "urbanx"})
-        data = r.json()
-        if data:
-            return float(data[0]["lat"]), float(data[0]["lon"])
-    except:
-        pass
-    return None, None
+def calc_area_m2(points):
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+    projected = [transformer.transform(p[0], p[1]) for p in points]
+    poly = Polygon(projected)
+    return poly.area
 
-# =========================
-# BUILDINGS
-# =========================
 def load_buildings(lat, lon):
+    url = "https://overpass-api.de/api/interpreter"
+
+    query = f"""
+    [out:json];
+    (
+      way["building"](around:200,{lat},{lon});
+    );
+    out body;
+    >;
+    out skel qt;
+    """
+
     try:
-        query = f"""
-        [out:json];
-        way["building"](around:150,{lat},{lon});
-        out geom;
-        """
-        r = requests.get("https://overpass-api.de/api/interpreter", params={"data": query})
-
-        if r.status_code != 200:
-            return []
-
+        r = requests.get(url, params={'data': query}, timeout=10)
         data = r.json()
+
+        nodes = {}
         buildings = []
 
-        for el in data.get("elements", []):
-            if "geometry" in el:
-                coords = [(p["lon"], p["lat"]) for p in el["geometry"]]
-                levels = el.get("tags", {}).get("building:levels")
-                height = float(levels)*3 if levels else 10
+        for el in data["elements"]:
+            if el["type"] == "node":
+                nodes[el["id"]] = (el["lon"], el["lat"])
+
+        for el in data["elements"]:
+            if el["type"] == "way":
+                coords = [nodes[n] for n in el["nodes"] if n in nodes]
+                if len(coords) < 3:
+                    continue
+
+                tags = el.get("tags", {})
+
+                if "height" in tags:
+                    h = float(tags["height"])
+                elif "building:levels" in tags:
+                    h = float(tags["building:levels"]) * 3
+                else:
+                    h = 12
 
                 buildings.append({
                     "polygon": coords,
-                    "height": height
+                    "height": h
                 })
 
         return buildings
@@ -71,230 +77,211 @@ def load_buildings(lat, lon):
     except:
         return []
 
-# =========================
-# AI VOLUME (NO OVERLAP)
-# =========================
-def generate_ai_volume(parcel_coords, buildings):
-
-    if len(parcel_coords) < 3:
+def generate_volume(points, buildings):
+    if len(points) < 3:
         return None
 
-    parcel = Polygon(parcel_coords)
+    poly = Polygon(points)
+    minx, miny, maxx, maxy = poly.bounds
 
-    building_polys = []
-    heights = []
+    # mic offset ca să nu suprapună clădiri
+    footprint = [
+        (minx + 0.00002, miny + 0.00002),
+        (maxx - 0.00002, miny + 0.00002),
+        (maxx - 0.00002, maxy - 0.00002),
+        (minx + 0.00002, maxy - 0.00002),
+    ]
 
-    for b in buildings:
-        try:
-            poly = Polygon(b["polygon"])
-            building_polys.append(poly.buffer(0.00003))
-            heights.append(b["height"])
-        except:
-            continue
+    avg_height = sum(b["height"] for b in buildings)/len(buildings) if buildings else 12
 
-    if building_polys:
-        occupied = unary_union(building_polys)
-        free_area = parcel.difference(occupied)
-    else:
-        free_area = parcel
+    return {
+        "polygon": footprint,
+        "height": avg_height * 1.2
+    }
 
-    if free_area.is_empty:
-        free_area = parcel.buffer(-0.00005)
-
-    if free_area.geom_type == "MultiPolygon":
-        free_area = max(free_area.geoms, key=lambda g: g.area)
-
-    coords = list(free_area.exterior.coords)
-
-    if heights:
-        height = min(sum(heights)/len(heights)*1.2, 45)
-    else:
-        height = 18
-
-    return {"polygon": coords, "height": height}
-
-# =========================
-# PDF
-# =========================
-def generate_pdf(address, area, footprint, gfa):
-
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer)
+def generate_pdf(area, pot, cut):
+    doc = SimpleDocTemplate("raport.pdf")
     styles = getSampleStyleSheet()
 
-    elements = []
+    content = []
 
-    elements.append(Paragraph("UrbanX – Studiu Urbanistic", styles["Title"]))
-    elements.append(Spacer(1, 10))
-    elements.append(Paragraph(f"Adresă: {address}", styles["Normal"]))
-    elements.append(Spacer(1, 10))
+    content.append(Paragraph("UrbanX – Studiu Urbanistic", styles["Title"]))
+    content.append(Spacer(1, 20))
 
-    elements.append(Paragraph("Indicatori:", styles["Heading2"]))
-    elements.append(Paragraph(f"Suprafață: {area:.0f} mp", styles["Normal"]))
-    elements.append(Paragraph(f"Amprentă: {footprint:.0f} mp", styles["Normal"]))
-    elements.append(Paragraph(f"GFA: {gfa:.0f} mp", styles["Normal"]))
+    content.append(Paragraph(f"Suprafață teren: {round(area)} mp", styles["Normal"]))
+    content.append(Paragraph(f"POT: {pot}", styles["Normal"]))
+    content.append(Paragraph(f"CUT: {cut}", styles["Normal"]))
 
-    elements.append(Spacer(1, 20))
-
-    elements.append(Paragraph("Interpretare:", styles["Heading2"]))
-    elements.append(Paragraph(
-        "Volumul propus este optim și adaptat contextului urban existent.",
-        styles["Normal"]
-    ))
-
-    doc.build(elements)
-    buffer.seek(0)
-    return buffer
-
-# =========================
-# INPUT
-# =========================
-address = st.text_input("📍 Adresă")
-
-if address:
-    lat, lon = geocode(address)
-    if lat:
-        st.session_state.lat = lat
-        st.session_state.lon = lon
-
-lat = st.session_state.lat
-lon = st.session_state.lon
+    doc.build(content)
 
 # =========================
 # TABS
 # =========================
-tabs = st.tabs(["🗺️ Hartă", "🏢 Clădiri", "📊 Indicatori", "🏗️ 3D", "📄 PDF"])
+
+tabs = st.tabs(["🗺 Hartă", "📊 Indicatori", "🧠 Analiză", "🧱 3D", "📄 PDF"])
+
+lat, lon = 47.746, 26.669
 
 # =========================
-# TAB 1 – HARTĂ (FIX BUG)
+# TAB 1 MAP
 # =========================
+
 with tabs[0]:
+
+    st.info("Click pe hartă pentru a defini parcela (minim 3 puncte)")
 
     m = folium.Map(location=[lat, lon], zoom_start=17)
 
-    # puncte
     for p in st.session_state.points:
-        folium.CircleMarker(location=[p[1], p[0]], radius=5, color="red").add_to(m)
+        folium.CircleMarker([p[1], p[0]], radius=5).add_to(m)
 
-    # poligon
     if len(st.session_state.points) >= 3:
         folium.Polygon(
             locations=[(p[1], p[0]) for p in st.session_state.points],
-            color="blue",
-            fill=True,
-            fill_opacity=0.3
+            color="blue"
         ).add_to(m)
 
-    map_data = st_folium(m, height=500)
+    map_data = st_folium(m, height=500, width=700)
 
     if map_data and map_data.get("last_clicked"):
-        pt = map_data["last_clicked"]
-        new_point = (pt["lng"], pt["lat"])
+        lat_click = map_data["last_clicked"]["lat"]
+        lon_click = map_data["last_clicked"]["lng"]
+        st.session_state.points.append((lon_click, lat_click))
+        st.rerun()
 
-        if new_point not in st.session_state.points:
-            st.session_state.points.append(new_point)
-
-    st.info(f"Puncte: {len(st.session_state.points)}")
-
-    if st.button("Reset"):
+    if st.button("Reset teren"):
         st.session_state.points = []
+        st.rerun()
 
 # =========================
-# TAB 2 – CLĂDIRI
+# TAB 2 INDICATORI
 # =========================
+
 with tabs[1]:
 
-    buildings = load_buildings(lat, lon)
-    st.success(f"{len(buildings)} clădiri detectate")
+    if len(st.session_state.points) >= 3:
+        area = calc_area_m2(st.session_state.points)
+    else:
+        area = 0
+
+    pot = 0.4
+    cut = 1.2
+
+    st.metric("Suprafață teren", f"{round(area)} mp")
+    st.metric("POT", pot)
+    st.metric("CUT", cut)
+
+    st.metric("Suprafață construită", round(area * pot))
+    st.metric("Suprafață desfășurată", round(area * cut))
 
 # =========================
-# TAB 3 – INDICATORI
+# TAB 3 ANALIZA
 # =========================
+
 with tabs[2]:
 
-    if len(st.session_state.points) >= 3:
-
-        parcel = Polygon(st.session_state.points)
-        area = parcel.area * 10000000000
-
-        pot = 0.4
-        cut = 1.2
-
-        footprint = area * pot
-        gfa = area * cut
-
-        st.metric("Suprafață", f"{area:.0f} mp")
-        st.metric("Amprentă", f"{footprint:.0f} mp")
-        st.metric("GFA", f"{gfa:.0f} mp")
+    st.write("Zonă urbană existentă")
+    st.write("Regim estimat: P+3 – P+5")
+    st.write("Funcțiune: mixt rezidențial")
 
 # =========================
-# TAB 4 – 3D
+# TAB 4 3D (CORE)
 # =========================
+
 with tabs[3]:
 
+    st.subheader("Vizualizare urbană 3D")
+
+    st.markdown("""
+    🔵 Volum propus  
+    ⚪ Clădiri existente  
+    📏 Etichete = înălțime (m)
+    """)
+
     buildings = load_buildings(lat, lon)
-    ai_vol = generate_ai_volume(st.session_state.points, buildings)
+    volume = generate_volume(st.session_state.points, buildings)
 
-    if ai_vol:
+    polygons = []
+    labels = []
 
-        st.markdown("🔵 Propus | ⚪ Existente")
-
-        data = []
-
-        for b in buildings:
-            data.append({
-                "polygon": b["polygon"],
-                "height": b["height"],
-                "color": [200,200,200]
-            })
-
-        data.append({
-            "polygon": ai_vol["polygon"],
-            "height": ai_vol["height"],
-            "color": [0,120,255]
+    # EXISTENTE
+    for b in buildings:
+        polygons.append({
+            "polygon": b["polygon"],
+            "height": b["height"],
+            "color": [200, 200, 200],
+            "type": "existent"
         })
 
-        layer = pdk.Layer(
-            "PolygonLayer",
-            data,
-            get_polygon="polygon",
-            get_elevation="height",
-            get_fill_color="color",
-            extruded=True
-        )
+        poly = Polygon(b["polygon"])
+        c = poly.centroid
 
-        st.pydeck_chart(pdk.Deck(
-            layers=[layer],
-            initial_view_state=pdk.ViewState(
-                latitude=lat,
-                longitude=lon,
-                zoom=17,
-                pitch=65,
-                bearing=30
-            )
-        ))
+        labels.append({
+            "position": [c.x, c.y],
+            "text": f"{int(b['height'])}m"
+        })
+
+    # PROPUS
+    if volume:
+        polygons.append({
+            "polygon": volume["polygon"],
+            "height": volume["height"],
+            "color": [0, 120, 255],
+            "type": "propus"
+        })
+
+        poly = Polygon(volume["polygon"])
+        c = poly.centroid
+
+        labels.append({
+            "position": [c.x, c.y],
+            "text": f"{int(volume['height'])}m"
+        })
+
+    polygon_layer = pdk.Layer(
+        "PolygonLayer",
+        polygons,
+        get_polygon="polygon",
+        get_elevation="height",
+        get_fill_color="color",
+        extruded=True,
+        pickable=True
+    )
+
+    text_layer = pdk.Layer(
+        "TextLayer",
+        labels,
+        get_position="position",
+        get_text="text",
+        get_size=16,
+        get_color=[255,255,255],
+        billboard=True
+    )
+
+    st.pydeck_chart(pdk.Deck(
+        layers=[polygon_layer, text_layer],
+        initial_view_state=pdk.ViewState(
+            latitude=lat,
+            longitude=lon,
+            zoom=17,
+            pitch=55,
+            bearing=30
+        ),
+        tooltip={
+            "html": "<b>{type}</b><br/>Înălțime: {height} m",
+            "style": {"backgroundColor": "black", "color": "white"}
+        }
+    ))
 
 # =========================
-# TAB 5 – PDF
+# TAB 5 PDF
 # =========================
+
 with tabs[4]:
 
-    if len(st.session_state.points) >= 3:
+    if st.button("Generează PDF"):
+        area = calc_area_m2(st.session_state.points) if len(st.session_state.points)>=3 else 0
+        generate_pdf(area, 0.4, 1.2)
 
-        parcel = Polygon(st.session_state.points)
-        area = parcel.area * 10000000000
-
-        pot = 0.4
-        cut = 1.2
-
-        footprint = area * pot
-        gfa = area * cut
-
-        pdf = generate_pdf(address, area, footprint, gfa)
-
-        st.download_button(
-            "📄 Descarcă PDF",
-            data=pdf,
-            file_name="UrbanX_report.pdf",
-            mime="application/pdf"
-        )
+        with open("raport.pdf", "rb") as f:
+            st.download_button("Download PDF", f, file_name="raport.pdf")
