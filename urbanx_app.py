@@ -19,8 +19,12 @@ st.title("🏙️ UrbanX PRO – Analiză urbanistică AI")
 if "points" not in st.session_state:
     st.session_state.points = []
 
+if "lat" not in st.session_state:
+    st.session_state.lat = 47.7486
+    st.session_state.lon = 26.669
+
 # =========================
-# GEOCODARE
+# GEOCODE
 # =========================
 def geocode(address):
     try:
@@ -68,11 +72,11 @@ def load_buildings(lat, lon):
         return []
 
 # =========================
-# AI VOLUME
+# AI VOLUME (NO OVERLAP)
 # =========================
 def generate_ai_volume(parcel_coords, buildings):
 
-    if not parcel_coords or len(parcel_coords) < 3:
+    if len(parcel_coords) < 3:
         return None
 
     parcel = Polygon(parcel_coords)
@@ -103,15 +107,14 @@ def generate_ai_volume(parcel_coords, buildings):
     coords = list(free_area.exterior.coords)
 
     if heights:
-        avg_h = sum(heights)/len(heights)
-        height = min(avg_h*1.2, 45)
+        height = min(sum(heights)/len(heights)*1.2, 45)
     else:
         height = 18
 
     return {"polygon": coords, "height": height}
 
 # =========================
-# PDF GENERATOR PRO
+# PDF
 # =========================
 def generate_pdf(address, area, footprint, gfa):
 
@@ -122,24 +125,20 @@ def generate_pdf(address, area, footprint, gfa):
     elements = []
 
     elements.append(Paragraph("UrbanX – Studiu Urbanistic", styles["Title"]))
-    elements.append(Spacer(1,10))
-
+    elements.append(Spacer(1, 10))
     elements.append(Paragraph(f"Adresă: {address}", styles["Normal"]))
-    elements.append(Spacer(1,10))
+    elements.append(Spacer(1, 10))
 
-    elements.append(Paragraph("Indicatori urbanistici:", styles["Heading2"]))
-    elements.append(Paragraph(f"Suprafață teren: {area:.0f} mp", styles["Normal"]))
-    elements.append(Paragraph(f"Amprentă maximă (POT): {footprint:.0f} mp", styles["Normal"]))
-    elements.append(Paragraph(f"Suprafață desfășurată (CUT): {gfa:.0f} mp", styles["Normal"]))
+    elements.append(Paragraph("Indicatori:", styles["Heading2"]))
+    elements.append(Paragraph(f"Suprafață: {area:.0f} mp", styles["Normal"]))
+    elements.append(Paragraph(f"Amprentă: {footprint:.0f} mp", styles["Normal"]))
+    elements.append(Paragraph(f"GFA: {gfa:.0f} mp", styles["Normal"]))
 
-    elements.append(Spacer(1,20))
+    elements.append(Spacer(1, 20))
 
-    elements.append(Paragraph("Interpretare AI:", styles["Heading2"]))
-
+    elements.append(Paragraph("Interpretare:", styles["Heading2"]))
     elements.append(Paragraph(
-        "Terenul permite dezvoltare urbană optimă conform indicatorilor. "
-        "Volumul propus este adaptat contextului existent și respectă "
-        "regimul de înălțime al clădirilor învecinate.",
+        "Volumul propus este optim și adaptat contextului urban existent.",
         styles["Normal"]
     ))
 
@@ -150,14 +149,16 @@ def generate_pdf(address, area, footprint, gfa):
 # =========================
 # INPUT
 # =========================
-address = st.text_input("📍 Introdu adresă")
-
-lat, lon = 47.7486, 26.669
+address = st.text_input("📍 Adresă")
 
 if address:
-    lat2, lon2 = geocode(address)
-    if lat2:
-        lat, lon = lat2, lon2
+    lat, lon = geocode(address)
+    if lat:
+        st.session_state.lat = lat
+        st.session_state.lon = lon
+
+lat = st.session_state.lat
+lon = st.session_state.lon
 
 # =========================
 # TABS
@@ -165,25 +166,41 @@ if address:
 tabs = st.tabs(["🗺️ Hartă", "🏢 Clădiri", "📊 Indicatori", "🏗️ 3D", "📄 PDF"])
 
 # =========================
-# HARTA
+# TAB 1 – HARTĂ (FIX BUG)
 # =========================
 with tabs[0]:
 
     m = folium.Map(location=[lat, lon], zoom_start=17)
 
+    # puncte
+    for p in st.session_state.points:
+        folium.CircleMarker(location=[p[1], p[0]], radius=5, color="red").add_to(m)
+
+    # poligon
+    if len(st.session_state.points) >= 3:
+        folium.Polygon(
+            locations=[(p[1], p[0]) for p in st.session_state.points],
+            color="blue",
+            fill=True,
+            fill_opacity=0.3
+        ).add_to(m)
+
     map_data = st_folium(m, height=500)
 
     if map_data and map_data.get("last_clicked"):
         pt = map_data["last_clicked"]
-        st.session_state.points.append((pt["lng"], pt["lat"]))
+        new_point = (pt["lng"], pt["lat"])
 
-    for p in st.session_state.points:
-        folium.CircleMarker(location=[p[1], p[0]], radius=5, color="red").add_to(m)
+        if new_point not in st.session_state.points:
+            st.session_state.points.append(new_point)
 
-    st_folium(m, height=500)
+    st.info(f"Puncte: {len(st.session_state.points)}")
+
+    if st.button("Reset"):
+        st.session_state.points = []
 
 # =========================
-# CLADIRI
+# TAB 2 – CLĂDIRI
 # =========================
 with tabs[1]:
 
@@ -191,7 +208,7 @@ with tabs[1]:
     st.success(f"{len(buildings)} clădiri detectate")
 
 # =========================
-# INDICATORI
+# TAB 3 – INDICATORI
 # =========================
 with tabs[2]:
 
@@ -211,7 +228,7 @@ with tabs[2]:
         st.metric("GFA", f"{gfa:.0f} mp")
 
 # =========================
-# 3D
+# TAB 4 – 3D
 # =========================
 with tabs[3]:
 
@@ -220,13 +237,15 @@ with tabs[3]:
 
     if ai_vol:
 
+        st.markdown("🔵 Propus | ⚪ Existente")
+
         data = []
 
         for b in buildings:
             data.append({
                 "polygon": b["polygon"],
                 "height": b["height"],
-                "color": [180,180,180]
+                "color": [200,200,200]
             })
 
         data.append({
@@ -250,12 +269,13 @@ with tabs[3]:
                 latitude=lat,
                 longitude=lon,
                 zoom=17,
-                pitch=65
+                pitch=65,
+                bearing=30
             )
         ))
 
 # =========================
-# PDF
+# TAB 5 – PDF
 # =========================
 with tabs[4]:
 
@@ -273,7 +293,7 @@ with tabs[4]:
         pdf = generate_pdf(address, area, footprint, gfa)
 
         st.download_button(
-            "📄 Descarcă PDF profesional",
+            "📄 Descarcă PDF",
             data=pdf,
             file_name="UrbanX_report.pdf",
             mime="application/pdf"
