@@ -1,6 +1,7 @@
 streamlit
 folium
 streamlit-folium
-shapely
 requests
 pydeck
+shapely
+reportlab
