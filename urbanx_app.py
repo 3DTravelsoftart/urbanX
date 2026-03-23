@@ -1,203 +1,172 @@
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
-from shapely.geometry import Polygon
 import requests
+import pandas as pd
 import pydeck as pdk
 
 st.set_page_config(layout="wide")
-st.title("UrbanX ENTERPRISE – Cadastru + AI")
 
-headers = {"User-Agent": "UrbanX-App"}
-
-# =========================
-# INPUT
-# =========================
-st.header("1. Adresă")
-
-adresa = st.text_input("Adresă")
-
-teren = None
-centru = None
+st.title("UrbanX ENTERPRISE – Analiză urbanistică AI")
 
 # =========================
-# GEOCODARE
+# TABS
 # =========================
-if adresa:
-    url = f"https://nominatim.openstreetmap.org/search?format=json&q={adresa}"
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📍 Adresă",
+    "🏗️ Clădiri",
+    "📊 Indicatori",
+    "🏙️ 3D"
+])
+
+# =========================
+# TAB 1 – ADRESA + HARTA
+# =========================
+with tab1:
+    st.header("Introdu adresă")
+
+    adresa = st.text_input("Adresă (ex: Strada Grivita Botosani)")
+
+    lat, lon = 47.7486, 26.669
+
+    if adresa:
+        try:
+            url = f"https://nominatim.openstreetmap.org/search?format=json&q={adresa}"
+            headers = {"User-Agent": "urbanx-app"}
+
+            response = requests.get(url, headers=headers)
+
+            if response.status_code == 200:
+                data = response.json()
+
+                if len(data) > 0:
+                    lat = float(data[0]["lat"])
+                    lon = float(data[0]["lon"])
+                    st.success("Adresă găsită")
+                else:
+                    st.warning("Adresă negăsită")
+
+        except:
+            st.error("Eroare geocoding")
+
+    m = folium.Map(location=[lat, lon], zoom_start=17)
+    folium.Marker([lat, lon]).add_to(m)
+
+    st_folium(m, width=1000, height=500)
+
+# =========================
+# TAB 2 – CLADIRI REALE (OSM)
+# =========================
+with tab2:
+    st.header("Clădiri din jur")
+
+    buildings = []
 
     try:
-        r = requests.get(url, headers=headers)
-
-        if r.status_code == 200:
-            data = r.json()
-        else:
-            data = []
-
-        if data:
-            lat = float(data[0]["lat"])
-            lon = float(data[0]["lon"])
-            centru = (lat, lon)
-
-            st.success("Locație găsită")
-
-    except:
-        st.error("Eroare geocodare")
-
-# =========================
-# HARTĂ
-# =========================
-m = folium.Map(location=[47.75, 26.66], zoom_start=16)
-map_data = st_folium(m, width=900, height=500)
-
-if not centru and map_data and map_data.get("last_clicked"):
-    lat = map_data["last_clicked"]["lat"]
-    lon = map_data["last_clicked"]["lng"]
-    centru = (lat, lon)
-
-# =========================
-# PARCELĂ REALISTĂ (OSM)
-# =========================
-if centru:
-
-    lat, lon = centru
-
-    st.header("2. Parcelă detectată")
-
-    try:
-        overpass_url = "http://overpass-api.de/api/interpreter"
-
         query = f"""
         [out:json];
         (
-          way["building"](around:50,{lat},{lon});
+          way["building"](around:150,{lat},{lon});
         );
-        out geom;
+        out body;
+        >;
+        out skel qt;
         """
 
-        r = requests.post(overpass_url, data=query)
+        response = requests.post(
+            "https://overpass-api.de/api/interpreter",
+            data=query
+        )
 
-        if r.status_code == 200:
-            data = r.json()
+        data = response.json()
 
-            if data["elements"]:
-                el = data["elements"][0]
-                coords = [(p["lon"], p["lat"]) for p in el["geometry"]]
+        nodes = {}
+        for el in data["elements"]:
+            if el["type"] == "node":
+                nodes[el["id"]] = (el["lat"], el["lon"])
 
-                teren = Polygon(coords)
-                st.success("Parcelă realistă detectată (din footprint clădire)")
+        for el in data["elements"]:
+            if el["type"] == "way":
+                coords = []
+                for n in el["nodes"]:
+                    if n in nodes:
+                        coords.append(nodes[n])
 
-    except:
-        teren = None
+                if len(coords) > 2:
+                    height = 10
 
-# fallback
-if not teren and centru:
-    lat, lon = centru
-    size = 0.00015
-    teren = Polygon([
-        (lon-size, lat-size),
-        (lon+size, lat-size),
-        (lon+size, lat+size),
-        (lon-size, lat+size)
-    ])
-    st.warning("Fallback parcelă (nu s-a găsit cadastru)")
+                    if "tags" in el:
+                        if "building:levels" in el["tags"]:
+                            try:
+                                height = int(el["tags"]["building:levels"]) * 3
+                            except:
+                                pass
 
-# =========================
-# ANALIZĂ
-# =========================
-if teren:
+                    buildings.append({
+                        "coords": coords,
+                        "height": height
+                    })
 
-    if not teren.is_valid:
-        teren = teren.buffer(0)
-
-    st.header("3. Suprafață")
-
-    suprafata = teren.area * 10000000
-    st.write(round(suprafata), "mp")
-
-    centru_geom = teren.centroid
-
-    # =========================
-    # STRADĂ
-    # =========================
-    st.header("4. Stradă")
-
-    try:
-        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={centru_geom.y}&lon={centru_geom.x}"
-        r = requests.get(url, headers=headers)
-
-        if r.status_code == 200:
-            data = r.json()
-            strada = data.get("address", {}).get("road", "necunoscută")
-        else:
-            strada = "necunoscută"
+        st.success(f"{len(buildings)} clădiri detectate")
 
     except:
-        strada = "necunoscută"
+        st.warning("Nu s-au putut încărca clădirile")
 
-    st.write(strada)
+# =========================
+# TAB 3 – INDICATORI
+# =========================
+with tab3:
+    st.header("Indicatori urbanistici")
 
-    # =========================
-    # REGULI
-    # =========================
-    st.header("5. Indicatori urbanistici")
+    pot = 0.4
+    cut = 1.2
 
-    POT = 0.4
-    CUT = 1.2
+    st.metric("POT", pot)
+    st.metric("CUT", cut)
 
-    # =========================
-    # RETRAGERI
-    # =========================
-    st.header("6. Retrageri")
+# =========================
+# TAB 4 – 3D REAL
+# =========================
+with tab4:
+    st.header("Vizualizare 3D")
 
-    retragere = st.slider("Retragere", 1, 10, 3)
+    if buildings:
+        data_3d = []
 
-    max_retragere = min(
-        teren.bounds[2] - teren.bounds[0],
-        teren.bounds[3] - teren.bounds[1]
-    ) / 4
+        for b in buildings:
+            poly = [[c[1], c[0]] for c in b["coords"]]
 
-    if retragere > max_retragere:
-        retragere = max_retragere
+            data_3d.append({
+                "polygon": poly,
+                "height": b["height"]
+            })
 
-    teren_retras = teren.buffer(-retragere)
+        df = pd.DataFrame(data_3d)
 
-    if teren_retras.is_empty:
-        st.error("Retrageri prea mari")
-        st.stop()
+        layer = pdk.Layer(
+            "PolygonLayer",
+            df,
+            get_polygon="polygon",
+            get_elevation="height",
+            elevation_scale=1,
+            extruded=True,
+            wireframe=True,
+        )
 
-    # =========================
-    # VOLUM AI
-    # =========================
-    st.header("7. Volum propus (AI)")
-
-    niveluri = max(1, int(CUT / POT))
-    height = niveluri * 3
-
-    coords = list(teren_retras.exterior.coords)
-
-    polygon = [{
-        "polygon": [[c[0], c[1]] for c in coords],
-        "height": height
-    }]
-
-    deck = pdk.Deck(
-        map_style="mapbox://styles/mapbox/light-v9",
-        initial_view_state=pdk.ViewState(
-            latitude=centru_geom.y,
-            longitude=centru_geom.x,
+        view_state = pdk.ViewState(
+            latitude=lat,
+            longitude=lon,
             zoom=17,
             pitch=45,
-        ),
-        layers=[
-            pdk.Layer(
-                "PolygonLayer",
-                polygon,
-                get_polygon="polygon",
-                get_elevation="height",
-                extruded=True,
-            )
-        ],
-    )
+        )
 
-    st.pydeck_chart(deck)
+        deck = pdk.Deck(
+            layers=[layer],
+            initial_view_state=view_state,
+            map_style="mapbox://styles/mapbox/dark-v10",
+        )
+
+        st.pydeck_chart(deck)
+
+    else:
+        st.info("Nu există date 3D")
