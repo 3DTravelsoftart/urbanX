@@ -4,10 +4,9 @@ import pydeck as pdk
 from streamlit_folium import st_folium
 import folium
 from shapely.geometry import Polygon
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Image
+from reportlab.platypus import SimpleDocTemplate, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
 import tempfile
-import matplotlib.pyplot as plt
 
 st.set_page_config(layout="wide")
 
@@ -22,7 +21,7 @@ if "parcels" not in st.session_state:
     st.session_state.parcels = []
 
 # =========================
-# BUILDINGS SAFE
+# BUILDINGS (SAFE)
 # =========================
 def load_buildings(lat, lon):
 
@@ -35,12 +34,7 @@ def load_buildings(lat, lon):
         out skel qt;
         """
 
-        r = requests.post(
-            "https://overpass-api.de/api/interpreter",
-            data=query,
-            timeout=10
-        )
-
+        r = requests.post("https://overpass-api.de/api/interpreter", data=query, timeout=10)
         data = r.json()
 
         nodes = {}
@@ -73,6 +67,7 @@ def load_buildings(lat, lon):
         return buildings
 
     except:
+        # fallback vizual
         return [{
             "polygon": [
                 [lon-0.0003, lat-0.0003],
@@ -84,7 +79,7 @@ def load_buildings(lat, lon):
         }]
 
 # =========================
-# PUZ AI
+# AI PUZ
 # =========================
 def generate_puz(points):
 
@@ -106,27 +101,17 @@ def generate_puz(points):
         "polygon": points,
         "area": area,
         "footprint": footprint,
-        "height": height
+        "height": height,
+        "POT": POT,
+        "CUT": CUT
     }
-
-# =========================
-# SNAPSHOT 3D
-# =========================
-def create_image():
-
-    fig = plt.figure()
-    plt.plot([0,1],[0,1])
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-    plt.savefig(tmp.name)
-    return tmp.name
 
 # =========================
 # PDF
 # =========================
-def generate_pdf(adresa, data, image_path):
+def generate_pdf(adresa, data):
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-
     doc = SimpleDocTemplate(tmp.name)
     styles = getSampleStyleSheet()
 
@@ -135,28 +120,27 @@ def generate_pdf(adresa, data, image_path):
     story.append(Paragraph("UrbanX – Studiu Urbanistic", styles["Title"]))
     story.append(Paragraph(f"Adresă: {adresa}", styles["Normal"]))
     story.append(Paragraph(f"Suprafață: {round(data['area'],1)} mp", styles["Normal"]))
-    story.append(Paragraph(f"Înălțime: {round(data['height'],1)} m", styles["Normal"]))
-
-    story.append(Image(image_path, width=400, height=200))
+    story.append(Paragraph(f"POT: {data['POT']}", styles["Normal"]))
+    story.append(Paragraph(f"CUT: {data['CUT']}", styles["Normal"]))
+    story.append(Paragraph(f"Hmax: {round(data['height'],1)} m", styles["Normal"]))
 
     doc.build(story)
-
     return tmp.name
 
 # =========================
 # UI
 # =========================
-st.title("UrbanX ENTERPRISE – INVESTOR MODE")
+st.title("UrbanX ENTERPRISE – Client Ready")
 
-adresa = st.text_input("Adresă")
+adresa = st.text_input("Adresă proiect")
 
-tabs = st.tabs(["Hartă", "Clădiri", "3D", "PDF"])
+tabs = st.tabs(["Hartă", "Clădiri", "Indicatori", "3D", "PDF"])
 
 lat = st.session_state.lat
 lon = st.session_state.lon
 
 # =========================
-# HARTA
+# TAB 1 - HARTA
 # =========================
 with tabs[0]:
 
@@ -171,37 +155,52 @@ with tabs[0]:
         c = map_data["last_clicked"]
         st.session_state.parcels.append((c["lng"], c["lat"]))
 
-    st.info(f"{len(st.session_state.parcels)} puncte")
+    st.info(f"{len(st.session_state.parcels)} puncte selectate")
 
-    if st.button("Reset"):
+    if st.button("Reset parcelă"):
         st.session_state.parcels = []
 
 # =========================
-# CLADIRI
+# TAB 2 - CLADIRI
 # =========================
 with tabs[1]:
 
     buildings = load_buildings(lat, lon)
 
-    st.metric("Clădiri detectate", len(buildings))
+    st.success(f"{len(buildings)} clădiri detectate")
+
+    st.markdown("**Legendă:**")
+    st.markdown("- gri = clădiri existente")
+    st.markdown("- înălțimi estimate din OSM")
 
 # =========================
-# 3D
+# TAB 3 - INDICATORI
 # =========================
 with tabs[2]:
+
+    puz = generate_puz(st.session_state.parcels)
+
+    if puz:
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Suprafață teren", round(puz["area"],1))
+        col2.metric("POT", puz["POT"])
+        col3.metric("CUT", puz["CUT"])
+
+# =========================
+# TAB 4 - 3D
+# =========================
+with tabs[3]:
 
     buildings = load_buildings(lat, lon)
     puz = generate_puz(st.session_state.parcels)
 
     if not puz:
-        st.warning("Selectează parcelă")
+        st.warning("Selectează minim 3 puncte")
     else:
 
-        col1, col2, col3 = st.columns(3)
-
-        col1.metric("Suprafață", round(puz["area"],1))
-        col2.metric("Footprint", round(puz["footprint"],1))
-        col3.metric("Înălțime", round(puz["height"],1))
+        st.markdown("### Legendă")
+        st.markdown("🔵 Albastru = Volum propus")
+        st.markdown("⚪ Gri = Clădiri existente")
 
         data = []
 
@@ -209,13 +208,13 @@ with tabs[2]:
             data.append({
                 "polygon": b["polygon"],
                 "height": b["height"],
-                "color": [150,150,150]
+                "color": [180,180,180]
             })
 
         data.append({
             "polygon": puz["polygon"],
             "height": puz["height"],
-            "color": [0,100,255]
+            "color": [0,120,255]
         })
 
         layer = pdk.Layer(
@@ -237,16 +236,15 @@ with tabs[2]:
         st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view))
 
 # =========================
-# PDF
+# TAB 5 - PDF
 # =========================
-with tabs[3]:
+with tabs[4]:
 
     puz = generate_puz(st.session_state.parcels)
 
     if puz and st.button("Generează PDF"):
 
-        img = create_image()
-        pdf = generate_pdf(adresa, puz, img)
+        pdf = generate_pdf(adresa, puz)
 
         with open(pdf, "rb") as f:
             st.download_button("Download PDF", f)
