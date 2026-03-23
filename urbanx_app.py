@@ -1,127 +1,156 @@
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
-from shapely.geometry import Polygon, Point
+from shapely.geometry import Polygon
 import requests
 import pydeck as pdk
 
 st.set_page_config(layout="wide")
-st.title("UrbanX ENTERPRISE – Analiză urbanistică AI")
+st.title("UrbanX ENTERPRISE – Cadastru + AI")
+
+headers = {"User-Agent": "UrbanX-App"}
 
 # =========================
-# INPUT ADRESĂ
+# INPUT
 # =========================
-st.header("1. Introdu adresă / locație")
+st.header("1. Adresă")
 
-adresa = st.text_input("Adresă (ex: Strada Grivita Botosani)")
+adresa = st.text_input("Adresă")
 
 teren = None
+centru = None
 
+# =========================
+# GEOCODARE
+# =========================
 if adresa:
     url = f"https://nominatim.openstreetmap.org/search?format=json&q={adresa}"
-    data = requests.get(url).json()
 
-    if data:
-        lat = float(data[0]["lat"])
-        lon = float(data[0]["lon"])
+    try:
+        r = requests.get(url, headers=headers)
 
-        # teren automat (buffer)
-        size = 0.00015
-        teren = Polygon([
-            (lon-size, lat-size),
-            (lon+size, lat-size),
-            (lon+size, lat+size),
-            (lon-size, lat+size)
-        ])
+        if r.status_code == 200:
+            data = r.json()
+        else:
+            data = []
 
-        st.success("Teren identificat automat")
+        if data:
+            lat = float(data[0]["lat"])
+            lon = float(data[0]["lon"])
+            centru = (lat, lon)
+
+            st.success("Locație găsită")
+
+    except:
+        st.error("Eroare geocodare")
 
 # =========================
 # HARTĂ
 # =========================
 m = folium.Map(location=[47.75, 26.66], zoom_start=16)
-
 map_data = st_folium(m, width=900, height=500)
 
-# fallback click
-if not teren and map_data and map_data.get("last_clicked"):
+if not centru and map_data and map_data.get("last_clicked"):
     lat = map_data["last_clicked"]["lat"]
     lon = map_data["last_clicked"]["lng"]
+    centru = (lat, lon)
 
-    size = 0.0001
+# =========================
+# PARCELĂ REALISTĂ (OSM)
+# =========================
+if centru:
+
+    lat, lon = centru
+
+    st.header("2. Parcelă detectată")
+
+    try:
+        overpass_url = "http://overpass-api.de/api/interpreter"
+
+        query = f"""
+        [out:json];
+        (
+          way["building"](around:50,{lat},{lon});
+        );
+        out geom;
+        """
+
+        r = requests.post(overpass_url, data=query)
+
+        if r.status_code == 200:
+            data = r.json()
+
+            if data["elements"]:
+                el = data["elements"][0]
+                coords = [(p["lon"], p["lat"]) for p in el["geometry"]]
+
+                teren = Polygon(coords)
+                st.success("Parcelă realistă detectată (din footprint clădire)")
+
+    except:
+        teren = None
+
+# fallback
+if not teren and centru:
+    lat, lon = centru
+    size = 0.00015
     teren = Polygon([
         (lon-size, lat-size),
         (lon+size, lat-size),
         (lon+size, lat+size),
         (lon-size, lat+size)
     ])
+    st.warning("Fallback parcelă (nu s-a găsit cadastru)")
 
 # =========================
 # ANALIZĂ
 # =========================
 if teren:
 
-    st.header("2. Teren")
+    if not teren.is_valid:
+        teren = teren.buffer(0)
+
+    st.header("3. Suprafață")
 
     suprafata = teren.area * 10000000
-    st.write(f"Suprafață: {round(suprafata)} mp")
+    st.write(round(suprafata), "mp")
 
-    centru = teren.centroid
+    centru_geom = teren.centroid
 
     # =========================
     # STRADĂ
     # =========================
-    st.header("3. Stradă")
+    st.header("4. Stradă")
 
     try:
-        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={centru.y}&lon={centru.x}"
-        r = requests.get(url).json()
-        strada = r.get("address", {}).get("road", "necunoscută")
+        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={centru_geom.y}&lon={centru_geom.x}"
+        r = requests.get(url, headers=headers)
+
+        if r.status_code == 200:
+            data = r.json()
+            strada = data.get("address", {}).get("road", "necunoscută")
+        else:
+            strada = "necunoscută"
+
     except:
         strada = "necunoscută"
 
     st.write(strada)
 
     # =========================
-    # CLĂDIRI
-    # =========================
-    st.header("4. Clădiri din jur")
-
-    try:
-        overpass_url = "http://overpass-api.de/api/interpreter"
-        query = f"""
-        [out:json];
-        (
-          way["building"](around:100,{centru.y},{centru.x});
-        );
-        out body;
-        """
-
-        data = requests.post(overpass_url, data=query).json()
-        nr_cladiri = len(data["elements"])
-        st.success(f"{nr_cladiri} clădiri identificate")
-
-    except:
-        nr_cladiri = 10
-        st.warning("Fallback clădiri")
-
-    # =========================
     # REGULI
     # =========================
-    st.header("5. Reguli urbanistice")
+    st.header("5. Indicatori urbanistici")
 
     POT = 0.4
     CUT = 1.2
-
-    st.write("POT:", POT)
-    st.write("CUT:", CUT)
 
     # =========================
     # RETRAGERI
     # =========================
     st.header("6. Retrageri")
 
-    retragere = st.slider("Retragere (m)", 1, 10, 3)
+    retragere = st.slider("Retragere", 1, 10, 3)
 
     max_retragere = min(
         teren.bounds[2] - teren.bounds[0],
@@ -129,41 +158,34 @@ if teren:
     ) / 4
 
     if retragere > max_retragere:
-        st.warning("Retragere ajustată automat")
         retragere = max_retragere
 
     teren_retras = teren.buffer(-retragere)
 
-    # =========================
-    # CALCUL
-    # =========================
-    amprenta = teren_retras.area * 10000000 * POT
-    suprafata_desfasurata = amprenta * (CUT / POT)
-
-    st.header("7. Indicatori")
-
-    st.write("Amprentă:", round(amprenta))
-    st.write("Suprafață desfășurată:", round(suprafata_desfasurata))
+    if teren_retras.is_empty:
+        st.error("Retrageri prea mari")
+        st.stop()
 
     # =========================
-    # 3D PROPUS
+    # VOLUM AI
     # =========================
-    st.header("8. Volum 3D PROPUS")
+    st.header("7. Volum propus (AI)")
 
-    niveluri = int(CUT / POT)
+    niveluri = max(1, int(CUT / POT))
+    height = niveluri * 3
 
     coords = list(teren_retras.exterior.coords)
 
     polygon = [{
         "polygon": [[c[0], c[1]] for c in coords],
-        "height": niveluri * 3
+        "height": height
     }]
 
     deck = pdk.Deck(
         map_style="mapbox://styles/mapbox/light-v9",
         initial_view_state=pdk.ViewState(
-            latitude=centru.y,
-            longitude=centru.x,
+            latitude=centru_geom.y,
+            longitude=centru_geom.x,
             zoom=17,
             pitch=45,
         ),
@@ -174,7 +196,6 @@ if teren:
                 get_polygon="polygon",
                 get_elevation="height",
                 extruded=True,
-                wireframe=True,
             )
         ],
     )
